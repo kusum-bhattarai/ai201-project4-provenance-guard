@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
 import audit
-from detection import llm_signal
+from detection import llm_signal, score_confidence, stylometry_signal
 
 load_dotenv()
 
@@ -38,13 +38,13 @@ def submit():
 
     content_id = str(uuid.uuid4())
 
-    # Signal 1 — LLM classifier.
-    llm = llm_signal(text)
+    # Multi-signal detection pipeline.
+    llm = llm_signal(text)                     # Signal 1 — semantic (Groq)
+    style = stylometry_signal(text)            # Signal 2 — structural (pure Python)
+    scored = score_confidence(llm["score"], style["score"])  # combine -> P(AI)
 
-    # Placeholder confidence & label until Milestone 4/5. For now surface Signal 1's
-    # score directly so the pipeline is inspectable end-to-end.
-    confidence = llm["score"]
-    attribution = "likely_ai" if confidence >= 0.7 else "likely_human" if confidence <= 0.35 else "uncertain"
+    confidence = scored["confidence"]
+    attribution = scored["attribution"]
     label = "PLACEHOLDER — real transparency label added in Milestone 5"
 
     audit.write_entry(
@@ -53,12 +53,14 @@ def submit():
             "creator_id": creator_id,
             "event": "classified",
             "attribution": attribution,
-            "confidence": round(confidence, 4),
-            "llm_score": round(llm["score"], 4),
-            "style_score": None,  # populated in Milestone 4
+            "confidence": confidence,
+            "llm_score": llm["score"],
+            "style_score": style["score"],
             "status": "classified",
             "label": label,
             "llm_rationale": llm["rationale"],
+            "disagreement": scored["disagreement"],
+            "style_metrics": style["metrics"],
         }
     )
 
@@ -66,8 +68,8 @@ def submit():
         {
             "content_id": content_id,
             "attribution": attribution,
-            "confidence": round(confidence, 4),
-            "signals": {"llm_score": round(llm["score"], 4), "style_score": None},
+            "confidence": confidence,
+            "signals": {"llm_score": llm["score"], "style_score": style["score"]},
             "label": label,
         }
     )

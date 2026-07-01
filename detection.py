@@ -6,6 +6,8 @@ Signal 2 (stylometry) and the confidence scorer are added in Milestone 4.
 
 import json
 import os
+import re
+import statistics
 
 from groq import Groq
 
@@ -55,6 +57,128 @@ def llm_signal(text: str, client: Groq | None = None) -> dict:
         return {"score": score, "rationale": rationale}
     except Exception as exc:  # pragma: no cover - network/parse safety net
         return {"score": 0.5, "rationale": f"LLM signal unavailable: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Signal 2 — Stylometric heuristics (pure Python, Milestone 4)
+# ---------------------------------------------------------------------------
+
+# Punctuation marks that tend to appear more in idiosyncratic human writing.
+_HUMAN_PUNCT = re.compile(r"[—–…();]|\.\.\.|\bi\b")
+
+# Very short text has unstable statistics; below this we damp the signal toward
+# 0.5 (uncertain) rather than trusting the raw numbers (edge case in planning.md).
+_SHORT_TEXT_WORDS = 40
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text.strip())
+    return [p for p in parts if p.strip()]
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-zA-Z']+", text.lower())
+
+
+def stylometry_signal(text: str) -> dict:
+    """Signal 2: structural regularity of the text.
+
+    Returns {"score": float in [0,1], "metrics": {...}}. Score 1.0 = maximally
+    uniform / AI-like. Combines three sub-metrics, each mapped to an AI-likeness
+    partial in [0,1]:
+      - burstiness   : coefficient of variation of sentence lengths (low CV = AI)
+      - ttr          : type-token ratio over a capped window (low diversity = AI/uniform)
+      - punctuation  : density of human-signal punctuation (more = human)
+    """
+    words = _tokenize(text)
+    sentences = _split_sentences(text)
+    n_words = len(words)
+
+    # Sub-metric 1: burstiness (coefficient of variation of sentence lengths).
+    sent_lengths = [len(_tokenize(s)) for s in sentences]
+    sent_lengths = [n for n in sent_lengths if n > 0]
+    if len(sent_lengths) >= 2:
+        mean_len = statistics.mean(sent_lengths)
+        cv = statistics.pstdev(sent_lengths) / mean_len if mean_len else 0.0
+    else:
+        cv = 0.0
+    # cv >= 0.6 is very human/bursty -> AI-likeness 0; cv 0 -> AI-likeness 1.
+    burstiness_ai = 1.0 - _clamp01(cv / 0.6)
+
+    # Sub-metric 2: type-token ratio over a capped window (reduces length bias).
+    window = words[:200]
+    ttr = len(set(window)) / len(window) if window else 0.0
+    # Low diversity (<=0.35, heavy repetition/uniformity) reads AI; >=0.70 reads human.
+    ttr_ai = 1.0 - _clamp01((ttr - 0.35) / 0.35)
+
+    # Sub-metric 3: human-signal punctuation density (per 100 words).
+    human_punct = len(_HUMAN_PUNCT.findall(text))
+    punct_per_100 = (human_punct / n_words * 100) if n_words else 0.0
+    # >= 4 such marks per 100 words is very human -> AI-likeness 0.
+    punct_ai = 1.0 - _clamp01(punct_per_100 / 4.0)
+
+    score = 0.5 * burstiness_ai + 0.2 * ttr_ai + 0.3 * punct_ai
+
+    # Damp toward uncertainty for very short inputs (unstable statistics).
+    if n_words < _SHORT_TEXT_WORDS:
+        damp = n_words / _SHORT_TEXT_WORDS
+        score = 0.5 + (score - 0.5) * damp
+
+    return {
+        "score": round(_clamp01(score), 4),
+        "metrics": {
+            "n_words": n_words,
+            "n_sentences": len(sent_lengths),
+            "cv_sentence_length": round(cv, 4),
+            "ttr": round(ttr, 4),
+            "human_punct_per_100w": round(punct_per_100, 4),
+            "burstiness_ai": round(burstiness_ai, 4),
+            "ttr_ai": round(ttr_ai, 4),
+            "punct_ai": round(punct_ai, 4),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Confidence scorer — combine the two signals (Milestone 4)
+# ---------------------------------------------------------------------------
+
+# Attribution band thresholds (asymmetric — biased against false positives).
+AI_THRESHOLD = 0.70        # confidence >= this  -> likely_ai
+HUMAN_THRESHOLD = 0.35     # confidence <= this  -> likely_human
+LLM_WEIGHT = 0.6           # LLM weighted higher than stylometry
+DISAGREEMENT_K = 0.5       # how hard disagreement pulls toward 0.5
+
+
+def _attribution_for(confidence: float) -> str:
+    if confidence >= AI_THRESHOLD:
+        return "likely_ai"
+    if confidence <= HUMAN_THRESHOLD:
+        return "likely_human"
+    return "uncertain"
+
+
+def score_confidence(llm_score: float, style_score: float) -> dict:
+    """Combine the two signals into a single confidence = P(AI) in [0,1].
+
+        base         = LLM_WEIGHT*llm + (1-LLM_WEIGHT)*style
+        disagreement = |llm - style|
+        confidence   = 0.5 + (base - 0.5) * (1 - DISAGREEMENT_K * disagreement)
+
+    Disagreement shrinkage pulls the score toward 0.5 when the signals conflict, so a
+    single confident signal can't brand content on its own (false-positive protection).
+    """
+    llm_score = _clamp01(llm_score)
+    style_score = _clamp01(style_score)
+    base = LLM_WEIGHT * llm_score + (1 - LLM_WEIGHT) * style_score
+    disagreement = abs(llm_score - style_score)
+    confidence = 0.5 + (base - 0.5) * (1 - DISAGREEMENT_K * disagreement)
+    confidence = _clamp01(confidence)
+    return {
+        "confidence": round(confidence, 4),
+        "attribution": _attribution_for(confidence),
+        "disagreement": round(disagreement, 4),
+    }
 
 
 if __name__ == "__main__":
