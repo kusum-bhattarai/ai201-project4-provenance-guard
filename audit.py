@@ -33,6 +33,7 @@ def init_db(db_path: str = DB_PATH) -> None:
                 confidence        REAL,                   -- combined P(AI) in [0,1]
                 llm_score         REAL,
                 style_score       REAL,
+                phrase_score      REAL,
                 status            TEXT,                   -- classified | under_review
                 label             TEXT,
                 appeal_reasoning  TEXT,
@@ -50,7 +51,7 @@ def write_entry(entry: dict, db_path: str = DB_PATH) -> None:
     """Insert one structured audit entry. Unknown keys are folded into `extra` JSON."""
     columns = {
         "content_id", "creator_id", "timestamp", "event", "attribution", "confidence",
-        "llm_score", "style_score", "status", "label", "appeal_reasoning",
+        "llm_score", "style_score", "phrase_score", "status", "label", "appeal_reasoning",
     }
     row = {k: entry.get(k) for k in columns}
     row.setdefault("timestamp", None)
@@ -64,10 +65,10 @@ def write_entry(entry: dict, db_path: str = DB_PATH) -> None:
             """
             INSERT INTO audit_log
                 (content_id, creator_id, timestamp, event, attribution, confidence,
-                 llm_score, style_score, status, label, appeal_reasoning, extra)
+                 llm_score, style_score, phrase_score, status, label, appeal_reasoning, extra)
             VALUES
                 (:content_id, :creator_id, :timestamp, :event, :attribution, :confidence,
-                 :llm_score, :style_score, :status, :label, :appeal_reasoning, :extra)
+                 :llm_score, :style_score, :phrase_score, :status, :label, :appeal_reasoning, :extra)
             """,
             row,
         )

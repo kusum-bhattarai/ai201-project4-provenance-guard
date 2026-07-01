@@ -140,14 +140,72 @@ def stylometry_signal(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Confidence scorer — combine the two signals (Milestone 4)
+# Signal 3 — AI-phrase lexicon detector (pure Python, Stretch: ensemble) · lexical
+# ---------------------------------------------------------------------------
+
+# Phrases/words empirically over-represented in instruction-tuned LLM output. Multiword
+# entries are stronger tells; single words are noisier (also used by humans) so they're
+# weighted less below. All matched case-insensitively with word boundaries.
+_AI_PHRASES = [
+    "it is important to note", "it is worth noting", "it is essential to",
+    "it is crucial to", "plays a crucial role", "play a crucial role",
+    "plays a significant role", "navigate the complexities",
+    "navigating the complexities", "a testament to", "in today's fast-paced world",
+    "in today's world", "in the realm of", "in conclusion", "in summary",
+    "when it comes to", "a wide range of", "at the end of the day",
+    "paradigm shift", "unlock the potential", "the world of",
+]
+_AI_WORDS = [
+    "furthermore", "moreover", "delve", "tapestry", "transformative", "seamless",
+    "seamlessly", "multifaceted", "holistic", "robust", "comprehensive", "myriad",
+    "leverage", "underscore", "underscores", "foster", "cutting-edge", "ever-evolving",
+    "ever-changing", "notably", "essential", "crucial",
+]
+
+_PHRASE_RE = re.compile("|".join(re.escape(p) for p in _AI_PHRASES), re.IGNORECASE)
+_WORD_RE = re.compile(r"\b(" + "|".join(re.escape(w) for w in _AI_WORDS) + r")\b", re.IGNORECASE)
+
+
+def phrase_signal(text: str) -> dict:
+    """Signal 3: density of characteristic AI boilerplate vocabulary.
+
+    Returns {"score": float in [0,1], "metrics": {...}}. Score 1.0 = dense AI boilerplate.
+    Multiword phrase hits count double (stronger tells); the weighted hit count is turned
+    into a per-100-word density and capped at 3 (>=3 weighted hits/100w reads fully AI).
+    """
+    n_words = len(_tokenize(text))
+    phrase_hits = len(_PHRASE_RE.findall(text))
+    word_hits = len(_WORD_RE.findall(text))
+    weighted = 2 * phrase_hits + 1 * word_hits
+    density = (weighted / n_words * 100) if n_words else 0.0
+    score = _clamp01(density / 3.0)
+
+    if n_words < _SHORT_TEXT_WORDS:  # unstable on tiny inputs; damp toward 0.5
+        score = 0.5 + (score - 0.5) * (n_words / _SHORT_TEXT_WORDS)
+
+    return {
+        "score": round(_clamp01(score), 4),
+        "metrics": {
+            "phrase_hits": phrase_hits,
+            "word_hits": word_hits,
+            "weighted_hits_per_100w": round(density, 4),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Confidence scorer — combine the signals into one P(AI) (Milestone 4 + ensemble)
 # ---------------------------------------------------------------------------
 
 # Attribution band thresholds (asymmetric — biased against false positives).
 AI_THRESHOLD = 0.70        # confidence >= this  -> likely_ai
 HUMAN_THRESHOLD = 0.35     # confidence <= this  -> likely_human
-LLM_WEIGHT = 0.6           # LLM weighted higher than stylometry
 DISAGREEMENT_K = 0.5       # how hard disagreement pulls toward 0.5
+
+# Ensemble weights (weighted vote). LLM highest (semantic), phrase lowest (noisiest).
+LLM_WEIGHT = 0.5
+STYLE_WEIGHT = 0.3
+PHRASE_WEIGHT = 0.2
 
 
 def _attribution_for(confidence: float) -> str:
@@ -158,20 +216,22 @@ def _attribution_for(confidence: float) -> str:
     return "uncertain"
 
 
-def score_confidence(llm_score: float, style_score: float) -> dict:
-    """Combine the two signals into a single confidence = P(AI) in [0,1].
+def score_confidence(llm_score: float, style_score: float, phrase_score: float) -> dict:
+    """Combine the three signals into a single confidence = P(AI) in [0,1] (ensemble).
 
-        base         = LLM_WEIGHT*llm + (1-LLM_WEIGHT)*style
-        disagreement = |llm - style|
-        confidence   = 0.5 + (base - 0.5) * (1 - DISAGREEMENT_K * disagreement)
+        base         = 0.5*llm + 0.3*style + 0.2*phrase       # weighted vote
+        disagreement = max(signals) - min(signals)            # spread across the 3
+        confidence   = 0.5 + (base - 0.5) * (1 - 0.5*disagreement)
 
-    Disagreement shrinkage pulls the score toward 0.5 when the signals conflict, so a
-    single confident signal can't brand content on its own (false-positive protection).
+    Disagreement shrinkage pulls the score toward 0.5 when the signals conflict, so no
+    lone confident signal can brand content on its own (false-positive protection). With
+    three signals a single dissenter widens the spread and pulls toward 'uncertain'.
     """
     llm_score = _clamp01(llm_score)
     style_score = _clamp01(style_score)
-    base = LLM_WEIGHT * llm_score + (1 - LLM_WEIGHT) * style_score
-    disagreement = abs(llm_score - style_score)
+    phrase_score = _clamp01(phrase_score)
+    base = LLM_WEIGHT * llm_score + STYLE_WEIGHT * style_score + PHRASE_WEIGHT * phrase_score
+    disagreement = max(llm_score, style_score, phrase_score) - min(llm_score, style_score, phrase_score)
     confidence = 0.5 + (base - 0.5) * (1 - DISAGREEMENT_K * disagreement)
     confidence = _clamp01(confidence)
     return {

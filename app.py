@@ -14,8 +14,9 @@ from flask import Flask, jsonify, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
+import analytics
 import audit
-from detection import llm_signal, score_confidence, stylometry_signal
+from detection import llm_signal, phrase_signal, score_confidence, stylometry_signal
 from labels import generate_label
 
 load_dotenv()
@@ -64,10 +65,11 @@ def submit():
 
     content_id = str(uuid.uuid4())
 
-    # Multi-signal detection pipeline.
+    # Multi-signal detection pipeline (3-signal ensemble).
     llm = llm_signal(text)                     # Signal 1 — semantic (Groq)
     style = stylometry_signal(text)            # Signal 2 — structural (pure Python)
-    scored = score_confidence(llm["score"], style["score"])  # combine -> P(AI)
+    phrase = phrase_signal(text)               # Signal 3 — lexical (AI-phrase lexicon)
+    scored = score_confidence(llm["score"], style["score"], phrase["score"])  # -> P(AI)
 
     confidence = scored["confidence"]
     attribution = scored["attribution"]
@@ -82,11 +84,13 @@ def submit():
             "confidence": confidence,
             "llm_score": llm["score"],
             "style_score": style["score"],
+            "phrase_score": phrase["score"],
             "status": "classified",
             "label": label["display_text"],
             "llm_rationale": llm["rationale"],
             "disagreement": scored["disagreement"],
             "style_metrics": style["metrics"],
+            "phrase_metrics": phrase["metrics"],
         }
     )
 
@@ -95,7 +99,11 @@ def submit():
             "content_id": content_id,
             "attribution": attribution,
             "confidence": confidence,
-            "signals": {"llm_score": llm["score"], "style_score": style["score"]},
+            "signals": {
+                "llm_score": llm["score"],
+                "style_score": style["score"],
+                "phrase_score": phrase["score"],
+            },
             "label": label,
         }
     )
@@ -127,6 +135,7 @@ def appeal():
             "confidence": original.get("confidence"),
             "llm_score": original.get("llm_score"),
             "style_score": original.get("style_score"),
+            "phrase_score": original.get("phrase_score"),
             "status": "under_review",
             "label": original.get("label"),
             "appeal_reasoning": creator_reasoning,
@@ -146,6 +155,16 @@ def appeal():
 def log():
     limit = request.args.get("limit", default=50, type=int)
     return jsonify({"entries": audit.get_log(limit=limit)})
+
+
+@app.route("/analytics", methods=["GET"])
+def analytics_json():
+    return jsonify(analytics.compute_metrics())
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    return analytics.render_dashboard_html(analytics.compute_metrics())
 
 
 if __name__ == "__main__":

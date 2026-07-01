@@ -365,3 +365,62 @@ and how to verify the output against this spec.
 - **Verify:** ask the label function for all three variants and diff against the text above.
   Confirm `/appeal` sets `status=under_review` and logs the appeal linked to the original
   decision. Confirm rate limiting returns 429 past the limit.
+
+---
+
+## Stretch Features
+
+*(Added after the required build, before implementing each stretch — per the assignment.)*
+
+### Stretch 1 — Ensemble detection (3rd signal + documented weighting)
+
+Adds a third, genuinely distinct signal so the pipeline is a 3-signal ensemble with a
+documented weighted-vote scheme.
+
+**Signal 3 — AI-phrase lexicon detector (pure Python) · *lexical*.** Counts occurrences of
+phrases and words empirically over-represented in LLM output ("it is important to note",
+"furthermore", "delve", "tapestry", "plays a crucial role", "paradigm shift",
+"navigate the complexities", "seamless", "multifaceted", …). Output `phrase_score ∈ [0,1]`
+(1 = dense AI boilerplate), computed as matched-phrase density per 100 words, capped.
+
+- **Measures:** a *lexical* property — the presence of characteristic AI boilerplate
+  vocabulary. Distinct from Signal 1 (semantic judgment) and Signal 2 (structural
+  statistics): a text can be structurally bursty yet still stuffed with AI clichés, or
+  perfectly uniform with none.
+- **Why it differs human vs. AI:** instruction-tuned models lean heavily on a recognizable
+  set of connective and "essayistic" phrases; casual human writing rarely stacks them.
+- **Blind spot:** noisy on formal/academic *human* writing, which legitimately uses some of
+  the same connectives — hence it gets the **lowest weight** and the disagreement penalty
+  still applies.
+
+**New weighting / voting scheme (3-signal ensemble):**
+
+```
+base         = 0.5·llm + 0.3·style + 0.2·phrase        # LLM highest, phrase lowest
+disagreement = max(llm, style, phrase) − min(llm, style, phrase)   # spread of the 3
+confidence   = 0.5 + (base − 0.5) · (1 − 0.5·disagreement)
+```
+
+This generalizes the 2-signal design: it's a **weighted vote** (LLM 0.5, stylometry 0.3,
+phrase 0.2) with a **disagreement shrinkage** driven by the spread across all three signals.
+The false-positive protection is preserved and strengthened — three signals must broadly
+*agree* before content is branded AI; any lone dissenter widens the spread and pulls the
+verdict toward *uncertain*. Bands (0.70 / 0.35) are unchanged. The phrase signal gets the
+smallest weight because it is the noisiest on formal human prose.
+
+### Stretch 2 — Analytics dashboard
+
+A read-only view over the audit log surfacing detection patterns and appeal behavior.
+
+- **`GET /analytics`** — JSON metrics computed from the audit log:
+  - **Band distribution** — counts and % of `likely_ai` / `uncertain` / `likely_human`
+    across all classifications (detection patterns).
+  - **Appeal rate** — appeals ÷ classifications.
+  - **Average signal disagreement** — mean spread across signals (my extra metric; a proxy
+    for how often the signals conflict, i.e. how much genuine uncertainty the corpus carries).
+  - Plus totals and per-signal mean scores.
+- **`GET /dashboard`** — a simple self-contained HTML page rendering those metrics (bars +
+  numbers) so a non-technical reviewer can read them at a glance.
+
+Both are pure reads over existing data — no new storage. In a real system these would sit
+behind auth; here they're for visibility and grading.
